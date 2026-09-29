@@ -1,9 +1,0 @@
-node_modules
-data
-test
-deploy/backups
-.git
-.env
-.env.*
-!.env.example
-*.log
