@@ -408,6 +408,27 @@ body.auth-mode{background:var(--surface)}
 @media (max-width:560px){.mods{grid-template-columns:repeat(2,minmax(0,1fr)) !important;gap:10px}.mod{padding:16px 10px}.mod small{display:none}}
 .top-search[hidden]{display:none}
 
+/* ---------- security ---------- */
+.banner.red{background:var(--signal-soft);border-color:rgba(216,69,43,.35)}.banner.red svg{color:var(--signal)}
+.sess{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px}
+.sess li{display:grid;grid-template-columns:40px 1fr auto;gap:12px;align-items:center;border:1px solid var(--line-2);border-radius:12px;padding:10px 12px}
+.sess b{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.sess small{display:block;color:var(--muted);font-size:12px}
+.mfa-setup{display:grid;grid-template-columns:220px 1fr;gap:20px;align-items:start}
+.mfa-setup img{border:1px solid var(--line);border-radius:12px;padding:8px;background:#fff;width:200px;height:200px}
+.mfa-setup ol{margin:0;padding-inline-start:20px;display:flex;flex-direction:column;gap:10px;line-height:1.7}
+.mfa-setup code{display:block;margin-top:6px;font-size:15px;letter-spacing:2px;background:var(--surface-2);border:1px dashed var(--line);border-radius:8px;padding:8px 10px;width:max-content;max-width:100%;overflow-wrap:anywhere}
+.mfa-confirm{display:flex;gap:10px;align-items:flex-start;margin-top:14px}
+.mfa-confirm input{height:44px;width:170px;font-size:22px;letter-spacing:6px;text-align:center;border:1px solid var(--line);border-radius:10px;background:var(--surface);color:var(--text)}
+.otp-in{font-size:22px !important;letter-spacing:6px;text-align:center}
+.codes{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-top:12px}
+.codes code{background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:10px;text-align:center;font-size:16px;letter-spacing:2px}
+.chk-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px;margin:10px 0 22px}
+.policy{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px}
+.policy li{display:flex;gap:8px;align-items:flex-start;line-height:1.6}.policy svg{width:18px;height:18px;color:var(--sea);flex:none;margin-top:3px}
+@media (max-width:760px){.mfa-setup{grid-template-columns:1fr}.mfa-setup img{margin:auto}.sess li{grid-template-columns:36px 1fr}.sess li .btn{grid-column:1/-1}}
+.mfa-confirm .field{flex:0 0 auto;width:auto;margin:0;min-width:0}
+.mfa-confirm .btn{flex:0 0 auto;height:44px}
+
 </style>
 </head>
 <body>
@@ -1164,12 +1185,14 @@ async function render() {
   closeMenus(); $$('.modal-back').forEach((m) => m.remove());
   const { path, query } = parseHash();
   const main = $('#page');
+  if (!main || !APP.me) return; // signed out: the login screen is showing
   main.onclick = main.onchange = main.oninput = main.onsubmit = null;
   for (const r of ROUTES) {
     const m = path.match(r.re);
     if (!m) continue;
     const params = Object.fromEntries(r.keys.map((k, i) => [k, m[i + 1]]));
     if (APP.me.role === 'client' && !r.pattern.startsWith('/portal') && !['/profile', '/notifications'].includes(r.pattern)) { location.hash = '#/portal'; return; }
+    if (APP.me.must2fa && r.pattern !== '/profile') { location.hash = '#/profile?tab=security'; return; }
     if (r.mod && !can(r.mod) && !(r.mod === 'customs' && can('customs'))) { main.innerHTML = pageHead({ title: 'لا توجد صلاحية', updated: false }) + emptyState('lock', 'ليست لديك صلاحية للوصول إلى هذه الوحدة', `دورك الحالي: ${APP.me.roleLabel}. تواصل مع مدير النظام.`, '<a class="btn primary" href="#/">العودة للرئيسية</a>'); return; }
     APP.route = r.pattern;
     $$('.drawer a').forEach((a) => a.classList.toggle('on', a.getAttribute('href') === '#' + (r.pattern.split('/').slice(0, 2).join('/') || '/')));
@@ -1255,7 +1278,7 @@ function authView(v, msg) {
     signup: `<h1>طلب حساب جديد</h1><p class="sub">يُرسل طلبك إلى الإدارة للموافقة، ثم يصلك رمز التفعيل على بريدك.</p>
       <form novalidate>${tf('a_user', 'username', 'اسم المستخدم', 'text', 'username', 'مثال: safa_bakr')}
       ${tf('a_email', 'email', 'البريد الإلكتروني', 'email', 'email', 'name@company.com', 'ltr')}
-      ${pwField('a_pass', 'كلمة المرور', 'new-password')}<small class="hint">8 أحرف على الأقل</small>
+      ${pwField('a_pass', 'كلمة المرور', 'new-password')}<small class="hint">8 أحرف على الأقل، تحتوي حروفاً وأرقاماً</small>
       <div class="alert" hidden></div><button class="btn primary block lg" type="submit">إرسال الطلب</button></form>
       <p class="alt">لديك حساب؟ <button class="link" data-go="login">تسجيل الدخول</button></p>`,
     verify: `<h1>تفعيل الحساب</h1>
@@ -1263,6 +1286,11 @@ function authView(v, msg) {
       <form novalidate><div class="field" data-f="code"><label for="a_code">رمز التفعيل</label><input id="a_code" class="code-in" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="••••••" required><small class="err"></small></div>
       <div class="alert" hidden></div><button class="btn primary block lg" type="submit">تفعيل والدخول</button></form>
       <p class="alt">لم يصلك الرمز؟ <button class="link" id="resend">إعادة إرسال الطلب</button> · <button class="link" data-go="login">رجوع</button></p>`,
+    '2fa': `<h1>التحقق بخطوتين</h1><p class="sub">أدخل الرمز المكوّن من 6 أرقام من تطبيق المصادقة على هاتفك، أو أحد رموز الاسترداد.</p>
+      <form novalidate><div class="field" data-f="code"><label for="a_code">رمز التحقق</label><input id="a_code" class="otp-in" inputmode="numeric" autocomplete="one-time-code" maxlength="9" placeholder="••••••" dir="ltr" required><small class="err"></small></div>
+      <div class="alert" hidden></div><button class="btn primary block lg" type="submit">تحقق ودخول</button></form>
+      <p class="alt"><button class="link" data-go="login">رجوع لتسجيل الدخول</button></p>
+      <p class="secure">${ic('shield')} حسابك محمي بالتحقق بخطوتين</p>`,
     forgot: `<h1>إعادة تعيين كلمة المرور</h1><p class="sub">أدخل بريدك المسجّل وسنرسل إليه رمز تحقق.</p>
       <form novalidate>${tf('a_email', 'email', 'البريد الإلكتروني', 'email', 'email', 'name@company.com', 'ltr')}
       <div class="alert" hidden></div><button class="btn primary block lg" type="submit">إرسال الرمز</button></form>
@@ -1293,14 +1321,17 @@ function authView(v, msg) {
     const ferr = (k, m) => { const f = $(`[data-f="${k}"]`, card); if (!f) return authAlert(m); f.classList.add('invalid'); $('.err', f).textContent = m; $('input', f).focus(); };
     let action, body;
     if (v === 'login') { if (!v2('a_login')) return ferr('login', 'أدخل اسم المستخدم أو البريد'); if (!pass) return ferr('password', 'أدخل كلمة المرور'); action = 'login'; body = { login: v2('a_login'), password: pass }; }
-    if (v === 'signup') { if (!/^[\p{L}\p{N}_.]{3,30}$/u.test(v2('a_user'))) return ferr('username', 'من 3 إلى 30 حرفاً أو رقماً بدون مسافات'); if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v2('a_email'))) return ferr('email', 'أدخل بريداً صحيحاً'); if (pass.length < 8) return ferr('password', '8 أحرف على الأقل'); action = 'register'; body = { username: v2('a_user'), email: v2('a_email'), password: pass }; }
+    if (v === '2fa') { const c = v2('a_code').replace(/\s/g, ''); if (!/^\d{6}$/.test(c) && !/^[a-z0-9]{4}-?[a-z0-9]{4}$/i.test(c)) return ferr('code', 'أدخل 6 أرقام أو رمز استرداد'); action = '2fa'; body = { code: c }; }
+    if (v === 'signup') { if (!/^[\p{L}\p{N}_.]{3,30}$/u.test(v2('a_user'))) return ferr('username', 'من 3 إلى 30 حرفاً أو رقماً بدون مسافات'); if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v2('a_email'))) return ferr('email', 'أدخل بريداً صحيحاً'); if (pass.length < 8 || !/\d/.test(pass) || !/[A-Za-z\u0600-\u06FF]/.test(pass)) return ferr('password', '8 أحرف على الأقل، حروف وأرقام معاً'); action = 'register'; body = { username: v2('a_user'), email: v2('a_email'), password: pass }; }
     if (v === 'verify') { if (v2('a_code').length !== 6) return ferr('code', 'الرمز 6 أرقام'); action = 'verify'; body = { code: v2('a_code') }; }
     if (v === 'forgot') { if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v2('a_email'))) return ferr('email', 'أدخل بريداً صحيحاً'); action = 'forgot'; body = { email: v2('a_email') }; }
-    if (v === 'reset') { if (v2('a_code').length !== 6) return ferr('code', 'الرمز 6 أرقام'); if (pass.length < 8) return ferr('password', '8 أحرف على الأقل'); action = 'reset'; body = { code: v2('a_code'), password: pass, email: AUTH.email }; }
+    if (v === 'reset') { if (v2('a_code').length !== 6) return ferr('code', 'الرمز 6 أرقام'); if (pass.length < 8 || !/\d/.test(pass)) return ferr('password', '8 أحرف على الأقل، حروف وأرقام معاً'); action = 'reset'; body = { code: v2('a_code'), password: pass, email: AUTH.email }; }
     const btn = $('button[type=submit]', card); const lab = btn.innerHTML; btn.disabled = true; btn.innerHTML = '<span class="spin"></span> جارٍ المعالجة…';
     try {
       const r = await api('POST', `api/auth?action=${action}`, body);
       if (r.next === 'verify') { AUTH.email = r.email || ''; authView('verify'); return; }
+      if (r.next === '2fa') { authView('2fa'); return; }
+      if (r.backupLeft !== undefined && r.backupLeft <= 2) setTimeout(() => toast(`تبقّى لديك ${r.backupLeft} من رموز الاسترداد. أنشئ رموزاً جديدة من صفحة الأمان.`, 'err'), 1500);
       if (action === 'forgot') { AUTH.email = body.email; authView('reset'); return; }
       if (r.user) boot();
     } catch (err) { err.field ? ferr(err.field, err.message) : authAlert(err.message); }
@@ -1351,7 +1382,7 @@ function toggleTheme() {
   r.dataset.theme = cur === 'dark' ? 'light' : 'dark'; try { localStorage.setItem('safa-theme', r.dataset.theme); } catch (e) {}
 }
 try { const t = localStorage.getItem('safa-theme'); if (t) document.documentElement.dataset.theme = t; } catch (e) {}
-async function logout() { try { await api('POST', 'api/auth?action=logout', {}); } catch (e) {} APP.me = null; APP.data = {}; location.hash = ''; AUTH.view = 'login'; authScreen('تم تسجيل الخروج.'); }
+async function logout() { try { await api('POST', 'api/auth?action=logout', {}); } catch (e) {} window.onhashchange = null; APP.me = null; APP.data = {}; history.replaceState(null, '', location.pathname); AUTH.view = 'login'; authScreen('تم تسجيل الخروج.'); }
 
 /* ---------------- boot ---------------- */
 async function boot() {
@@ -1501,6 +1532,7 @@ route('/profile', async (main, p, q) => {
   const u = APP.me, pr = APP.prefs;
   const st = { tab: q.tab || 'prefs' };
   main.innerHTML = `${pageHead({ title: 'الملف الشخصي والإعدادات', sub: 'إدارة بياناتك الشخصية وتفضيلاتك في النظام', icon: 'user', crumbs: [['الملف الشخصي']] })}
+    ${u.must2fa ? `<div class="banner red">${ic('shield')}<div><b>التحقق بخطوتين مطلوب لحسابك</b><small>سياسة الأمان في الشركة تتطلب تفعيل التحقق بخطوتين لدورك. فعّله من الأسفل لتتمكن من استخدام النظام.</small></div></div>` : ''}
     <section class="panel profile-card"><div class="pc-av">${esc((u.fullName || u.username).charAt(0).toUpperCase())}</div>
       <div class="pc-grid">${[['الاسم', u.fullName || u.username], ['البريد الإلكتروني', u.email], ['الدور الوظيفي', u.roleLabel], ['الفرع', refLabel('branches', u.branchId) || '—'], ['آخر دخول', u.lastLogin ? new Date(u.lastLogin).toISOString().slice(0, 16).replace('T', ' ') : '—']]
         .map(([l, v]) => `<div><small>${l}</small><b>${esc(v)}</b></div>`).join('')}</div></section>
@@ -1512,7 +1544,8 @@ route('/profile', async (main, p, q) => {
       <div class="field"><label>الهاتف</label><input name="phone" dir="ltr" value="${esc(u.phone || '')}"></div><div class="field"><label>اسم المستخدم</label><input value="${esc(u.username)}" disabled></div>
       <div class="field"><label>البريد الإلكتروني</label><input value="${esc(u.email)}" disabled dir="ltr"></div></form><div class="form-actions"><button class="btn primary" id="pSave">${ic('save')} حفظ التغييرات</button></div>`, { icon: 'user' });
     if (st.tab === 'security') b.innerHTML = panel('تغيير كلمة المرور', `<form class="form-grid cols-1 narrow" id="pw">${['current', 'password', 'confirm'].map((k, i) => `<div class="field" data-f="${k}"><label>${['كلمة المرور الحالية', 'كلمة المرور الجديدة', 'تأكيد كلمة المرور'][i]}</label><div class="pw"><input name="${k}" type="password" autocomplete="${i ? 'new-password' : 'current-password'}"><button type="button" class="eye" aria-label="إظهار">${ic('eye')}</button></div><small class="err"></small></div>`).join('')}</form>
-      <div class="form-actions"><button class="btn primary" id="pwSave">${ic('lock')} تحديث كلمة المرور</button></div>`, { icon: 'lock' });
+      <div class="form-actions"><button class="btn primary" id="pwSave">${ic('lock')} تحديث كلمة المرور</button></div>`, { icon: 'lock' }) + '<div id="secX"><div class="loading"><span class="spin"></span></div></div>';
+    if (st.tab === 'security') loadSecurity();
     if (st.tab === 'notif') { const n = pr.notif || {}; b.innerHTML = panel('الإشعارات', `<div class="toggles">${[['contracts', 'إشعارات العقود', 'تلقي إشعارات عند انتهاء العقود وتحديث حالتها'], ['ops', 'إشعارات العمليات والشحنات', 'تلقي إشعارات حول العمليات والشحنات'], ['customers', 'إشعارات العملاء', 'إشعارات حول العملاء وطلبات الخدمة'], ['finance', 'إشعارات الفواتير والمدفوعات', 'تلقي إشعارات حول الفواتير والمدفوعات'], ['system', 'النشرات والتحديثات', 'تلقي النشرات الإخبارية وتحديثات النظام']]
       .map(([k, l, d]) => `<label class="tg"><div><b>${l}</b><small>${d}</small></div><span class="switch"><input type="checkbox" data-n="${k}" ${n[k] !== false ? 'checked' : ''}><span></span></span></label>`).join('')}</div><div class="form-actions"><button class="btn primary" id="nSave">${ic('save')} حفظ</button></div>`, { icon: 'bell' }); }
     if (st.tab === 'prefs') b.innerHTML = panel('التفضيلات العامة', `<form class="form-grid" id="pp"><div class="field"><label>اللغة</label><select name="lang"><option value="ar">العربية</option></select></div>
@@ -1520,14 +1553,58 @@ route('/profile', async (main, p, q) => {
       <div class="field"><label>المنطقة الزمنية</label><select name="tz">${['Asia/Damascus', 'Asia/Riyadh', 'Asia/Dubai', 'Asia/Amman', 'Europe/Istanbul', 'Europe/Amsterdam'].map((z) => `<option ${pr.tz === z ? 'selected' : ''}>${z}</option>`).join('')}</select></div></form>
       <div class="form-actions"><button class="btn primary" id="ppSave">${ic('save')} حفظ التغييرات</button></div>`, { icon: 'gear' });
   };
+  async function loadSecurity() {
+    const box = $('#secX'); if (!box) return;
+    let d; try { d = await api('GET', 'api/auth?action=sessions'); } catch (e) { box.innerHTML = emptyState('alert', 'تعذّر تحميل بيانات الأمان', e.message); return; }
+    const dev = (ua) => /mobile|android|iphone/i.test(ua) ? 'هاتف' : /ipad|tablet/i.test(ua) ? 'جهاز لوحي' : 'كمبيوتر';
+    const br = (ua) => (/edg\//i.test(ua) ? 'Edge' : /chrome/i.test(ua) ? 'Chrome' : /firefox/i.test(ua) ? 'Firefox' : /safari/i.test(ua) ? 'Safari' : 'متصفح');
+    box.innerHTML = panel('التحقق بخطوتين (2FA)', d.mfa
+      ? `<div class="ok-box">${ic('shield')}<div><b>التحقق بخطوتين مفعّل</b><small>يُطلب رمز من تطبيق المصادقة عند كل تسجيل دخول. رموز الاسترداد المتبقية: ${d.backupLeft}</small></div></div>
+         <div class="form-actions"><button class="btn danger ghost" id="mfaOff">${ic('x')} إيقاف التحقق بخطوتين</button></div>`
+      : `<p class="muted">أضف طبقة حماية ثانية: بعد كلمة المرور يُطلب رمز يتغير كل 30 ثانية من تطبيق على هاتفك (Google Authenticator أو Microsoft Authenticator). ننصح بتفعيله لكل المدراء والمحاسبين.</p>
+         <div id="mfaSetup"><button class="btn primary" id="mfaStart">${ic('shield')} تفعيل التحقق بخطوتين</button></div>`, { icon: 'shield' })
+      + panel('الأجهزة المتصلة', `<ul class="sess">${d.items.map((x) => `<li><span class="s-ic">${ic(dev(x.ua) === 'هاتف' ? 'phone' : 'grid')}</span><div><b>${dev(x.ua)} · ${br(x.ua)} ${x.current ? badge('هذا الجهاز', 'green') : ''}</b><small class="ltr">${esc(x.ip || '')}</small><small>آخر نشاط: ${esc(timeAgo(new Date(x.lastSeen).toISOString()))} · بدأت: ${esc(new Date(x.created).toISOString().slice(0, 10))}</small></div>${x.current ? '' : `<button class="btn sm ghost" data-revoke="${x.id}">${ic('logout')} إنهاء</button>`}</li>`).join('')}</ul>
+        ${d.items.length > 1 ? `<div class="form-actions"><button class="btn danger ghost" id="logoutAll">${ic('logout')} تسجيل الخروج من كل الأجهزة الأخرى</button></div>` : ''}`, { icon: 'grid' })
+      + panel('سجل الدخول الأخير', d.logins.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>الوقت</th><th>النتيجة</th><th>العنوان</th><th>الجهاز</th></tr></thead><tbody>${d.logins.map((l) => `<tr><td>${dtFmt(l.at)}</td><td>${l.ok ? badge('ناجح', 'green') : badge({ 'bad-password': 'كلمة مرور خاطئة', 'bad-2fa': 'رمز تحقق خاطئ', locked: 'حساب مقفل مؤقتاً', disabled: 'حساب موقوف' }[l.reason] || 'فشل', 'red')}</td><td class="ltr">${esc(l.ip || '')}</td><td>${dev(l.ua || '')} · ${br(l.ua || '')}</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted">لا يوجد سجل بعد.</p>', { icon: 'clock' });
+  }
+  async function mfaStart(btn) {
+    const r = await busy(btn, () => api('POST', 'api/auth?action=mfa-setup', {}));
+    $('#mfaSetup').innerHTML = `<div class="mfa-setup"><img src="${r.qr}" alt="رمز QR لتطبيق المصادقة" width="200" height="200">
+      <ol><li>ثبّت تطبيق <b>Google Authenticator</b> أو <b>Microsoft Authenticator</b> على هاتفك.</li><li>امسح رمز QR بالتطبيق، أو أدخل هذا المفتاح يدوياً:<code class="ltr">${esc(r.secret)}</code></li><li>اكتب الرمز المكوّن من 6 أرقام الظاهر في التطبيق:</li></ol>
+      <form id="mfaForm" class="mfa-confirm"><div class="field" data-f="code"><input name="code" inputmode="numeric" maxlength="6" dir="ltr" placeholder="000000" aria-label="رمز التحقق" autocomplete="one-time-code"><small class="err"></small></div><button class="btn primary" type="submit">${ic('check')} تأكيد وتفعيل</button></form></div>`;
+    $('#mfaForm [name=code]').focus();
+  }
   main.onclick = async (e) => {
     const t = e.target.closest('[data-tab]'); if (t) { st.tab = t.dataset.tab; $$('[data-tab]', main).forEach((x) => x.classList.toggle('on', x === t)); draw(); return; }
+    if (e.target.closest('#mfaStart')) return mfaStart(e.target.closest('button')).catch(() => {});
+    const rv = e.target.closest('[data-revoke]'); if (rv) { try { await api('POST', 'api/auth?action=session-revoke', { id: +rv.dataset.revoke }); toast('تم إنهاء الجلسة'); loadSecurity(); } catch (err) { toast(err.message, 'err'); } return; }
+    if (e.target.closest('#logoutAll')) { if (await confirmBox('تسجيل الخروج من كل الأجهزة الأخرى؟', { ok: 'تسجيل الخروج' })) { await api('POST', 'api/auth?action=logout-all', {}); toast('تم تسجيل الخروج من الأجهزة الأخرى'); loadSecurity(); } return; }
+    if (e.target.closest('#mfaOff')) {
+      const m = modal({ title: 'إيقاف التحقق بخطوتين', icon: 'shield', body: `<p class="lead-p">سيصبح حسابك محمياً بكلمة المرور فقط. للتأكيد أدخل كلمة المرور:</p><form class="form-grid cols-1"><div class="field" data-f="password"><input type="password" name="password" autocomplete="current-password" aria-label="كلمة المرور"><small class="err"></small></div></form>`,
+        foot: `<button class="btn danger ok">إيقاف</button><button class="btn ghost no">إلغاء</button>` });
+      $('.no', m.el).onclick = m.close; $('form', m.el).onsubmit = (ev) => { ev.preventDefault(); $('.ok', m.el).click(); };
+      $('.ok', m.el).onclick = (ev) => busy(ev.currentTarget, async () => { try { await api('POST', 'api/auth?action=mfa-disable', readForm($('form', m.el))); } catch (err) { fieldError($('form', m.el), 'password', err.message); throw err; } m.close(); APP.me.mfa = false; toast('تم إيقاف التحقق بخطوتين'); loadSecurity(); }).catch(() => {});
+      return;
+    }
     const eye = e.target.closest('.eye'); if (eye) { const i = eye.previousElementSibling; i.type = i.type === 'password' ? 'text' : 'password'; eye.innerHTML = ic(i.type === 'password' ? 'eye' : 'eyeOff'); return; }
     if (e.target.closest('#pSave')) busy(e.target.closest('button'), async () => { const d = readForm($('#pf')); await api('PUT', '/me', d); Object.assign(APP.me, d); toast('تم حفظ البيانات'); shell(); render(); }).catch(() => {});
     if (e.target.closest('#pwSave')) busy(e.target.closest('button'), async () => { const d = readForm($('#pw')); if (d.password.length < 8) { fieldError($('#pw'), 'password', '8 أحرف على الأقل'); throw new Error('كلمة المرور قصيرة'); } if (d.password !== d.confirm) { fieldError($('#pw'), 'confirm', 'كلمتا المرور غير متطابقتين'); throw new Error('كلمتا المرور غير متطابقتين'); }
       await api('POST', '/me/password', { current: d.current, password: d.password }); $('#pw').reset(); toast('تم تحديث كلمة المرور'); }).catch(() => {});
     if (e.target.closest('#nSave')) busy(e.target.closest('button'), async () => { const n = {}; $$('[data-n]', main).forEach((c) => { n[c.dataset.n] = c.checked; }); await api('PUT', '/me', { prefs: { notif: n } }); APP.prefs.notif = n; toast('تم حفظ تفضيلات الإشعارات'); }).catch(() => {});
     if (e.target.closest('#ppSave')) busy(e.target.closest('button'), async () => { const d = readForm($('#pp')); await api('PUT', '/me', { prefs: d }); Object.assign(APP.prefs, d); toast('تم حفظ التفضيلات'); }).catch(() => {});
+  };
+  main.onsubmit = async (e) => {
+    if (e.target.id !== 'mfaForm') return; e.preventDefault();
+    const btn = $('button[type=submit]', e.target), code = $('[name=code]', e.target).value.trim();
+    if (!/^\d{6}$/.test(code)) return fieldError(e.target, 'code', 'الرمز 6 أرقام');
+    try {
+      const r = await busy(btn, () => api('POST', 'api/auth?action=mfa-enable', { code }));
+      APP.me.mfa = true; APP.me.must2fa = false;
+      const m = modal({ title: 'تم تفعيل التحقق بخطوتين', icon: 'shield', body: `<p class="lead-p">احفظ رموز الاسترداد هذه في مكان آمن. كل رمز يُستخدم مرة واحدة إذا فقدت هاتفك. <b>لن تظهر مرة أخرى.</b></p>
+        <div class="codes ltr">${r.backup.map((c) => `<code>${esc(c)}</code>`).join('')}</div>`, foot: `<button class="btn ghost cp">${ic('copy')} نسخ الرموز</button><button class="btn primary ok">حفظتها</button>` });
+      $('.cp', m.el).onclick = () => { navigator.clipboard && navigator.clipboard.writeText(r.backup.join('\n')).then(() => toast('تم النسخ')).catch(() => {}); };
+      $('.ok', m.el).onclick = () => { m.close(); render(); };
+    } catch (err) { fieldError(e.target, 'code', err.message); }
   };
   if (!APP.data.branches) await load(['branches']).catch(() => {});
   draw();
@@ -2968,7 +3045,7 @@ route('/settings', async (main) => {
   dataTable($('#uT'), { rows: users, onRow: (r) => go('#/settings/users/' + r.id),
     cols: [{ label: 'المستخدم', render: (r) => `<div class="cell-ic"><span class="av sm">${esc((r.fullName || r.username).charAt(0).toUpperCase())}</span><div><b>${esc(r.fullName || r.username)}</b><small class="ltr">${esc(r.email)}</small></div></div>` },
       { label: 'الفرع', render: (r) => esc(refLabel('branches', r.branchId) || '—') }, { label: 'الدور', render: (r) => badge(APP.roles[r.role] || r.role, r.role === 'admin' ? 'navy' : r.role === 'client' ? 'amber' : 'blue') },
-      { label: 'آخر دخول', render: (r) => r.lastLogin ? esc(timeAgo(new Date(r.lastLogin).toISOString())) : '—' }, { label: 'الحالة', render: (r) => badge({ active: 'نشط', disabled: 'غير نشط', pending: 'بانتظار التفعيل' }[r.status] || r.status, { active: 'green', disabled: 'red', pending: 'amber' }[r.status]) }] });
+      { label: 'آخر دخول', render: (r) => r.lastLogin ? esc(timeAgo(new Date(r.lastLogin).toISOString())) : '—' }, { label: 'الأمان', render: (r) => `${r.mfa ? badge('2FA', 'green') : '<span class="muted">—</span>'} ${r.locked ? badge('مقفل مؤقتاً', 'red') : ''}` }, { label: 'الحالة', render: (r) => badge({ active: 'نشط', disabled: 'غير نشط', pending: 'بانتظار التفعيل' }[r.status] || r.status, { active: 'green', disabled: 'red', pending: 'amber' }[r.status]) }] });
 }, 'settings');
 
 async function userPage(main, id) {
@@ -2982,8 +3059,8 @@ async function userPage(main, id) {
     return `<div class="tbl-wrap"><table class="tbl matrix"><thead><tr><th>الوحدة</th><th>قراءة</th><th>إضافة</th><th>تعديل</th><th>حذف</th></tr></thead><tbody>${R.modules.map(([k, l, i]) => `<tr><td><div class="cell-ic">${ic(i)}<span>${esc(l)}</span></div></td>${'rcud'.split('').map((a) => `<td class="center">${role === 'admin' || String(pr[k] || '').includes(a) ? `<span class="tick">${ic('check')}</span>` : '<span class="muted">—</span>'}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`; };
   const draw = async () => {
     main.innerHTML = `${pageHead({ title: u ? `تفاصيل المستخدم والصلاحيات — ${u.fullName || u.username}` : 'إضافة مستخدم', icon: 'user', crumbs: [['الإعدادات', '#/settings'], [u ? 'تفاصيل المستخدم' : 'إضافة مستخدم']], updated: false,
-        actions: u && isAdmin() ? `<button class="btn ghost" id="uToggle">${ic('lock')} ${u.status === 'active' ? 'تعطيل الحساب' : 'تفعيل الحساب'}</button>` : '' })}
-      ${u ? `<section class="strip">${[['الحالة', badge({ active: 'نشط', disabled: 'غير نشط', pending: 'بانتظار التفعيل' }[u.status], { active: 'green', disabled: 'red', pending: 'amber' }[u.status])], ['الفرع', esc(refLabel('branches', u.branchId) || '—')], ['الدور', esc(APP.roles[u.role] || u.role)], ['آخر تسجيل دخول', u.lastLogin ? `<span class="ltr">${esc(new Date(u.lastLogin).toISOString().slice(0, 16).replace('T', ' '))}</span>` : '—']].map(([l, x], i) => `<div><span class="s-ic">${ic(['check', 'bldg', 'briefcase', 'clock'][i])}</span><div><small>${l}</small><b>${x}</b></div></div>`).join('')}</section>
+        actions: u && isAdmin() ? `${u.locked ? `<button class="btn ghost" id="uUnlock">${ic('key')} فك القفل المؤقت</button>` : ''}${u.mfa ? `<button class="btn ghost" id="uMfa">${ic('shield')} إعادة ضبط التحقق بخطوتين</button>` : ''}<button class="btn ghost" id="uToggle">${ic('lock')} ${u.status === 'active' ? 'تعطيل الحساب' : 'تفعيل الحساب'}</button>` : '' })}
+      ${u ? `<section class="strip">${[['الحالة', badge({ active: 'نشط', disabled: 'غير نشط', pending: 'بانتظار التفعيل' }[u.status], { active: 'green', disabled: 'red', pending: 'amber' }[u.status])], ['الفرع', esc(refLabel('branches', u.branchId) || '—')], ['الدور', esc(APP.roles[u.role] || u.role)], ['آخر تسجيل دخول', u.lastLogin ? `<span class="ltr">${esc(new Date(u.lastLogin).toISOString().slice(0, 16).replace('T', ' '))}</span>` : '—'], ['التحقق بخطوتين', u.mfa ? badge('مفعّل', 'green') : badge('غير مفعّل', '')]].map(([l, x], i) => `<div><span class="s-ic">${ic(['check', 'bldg', 'briefcase', 'clock', 'shield'][i])}</span><div><small>${l}</small><b>${x}</b></div></div>`).join('')}</section>
         <div class="tabs-bar">${[['data', 'بيانات المستخدم'], ['roles', 'الأدوار والصلاحيات'], ['audit', 'سجل التدقيق']].map(([k, l]) => `<button class="tb ${tab === k ? 'on' : ''}" data-tab="${k}">${l}</button>`).join('')}</div>` : ''}
       <div id="uBody"></div>`;
     const B = $('#uBody');
@@ -3002,17 +3079,20 @@ async function userPage(main, id) {
         <aside>${panel('الصلاحيات المرتبطة بالدور', `<div id="rolePrev">${matrix(v.role)}</div>`, { icon: 'shield' })}</aside></div>`;
     }
     if (tab === 'roles') B.innerHTML = panel(`مصفوفة صلاحيات الدور: ${APP.roles[u.role]}`, matrix(u.role) + `<a class="btn ghost" href="#/settings/roles">${ic('edit')} تعديل مصفوفة الأدوار</a>`, { icon: 'shield' });
-    if (tab === 'audit') { const a = await api('GET', `/users/${u.id}/audit`); B.innerHTML = panel('سجل التدقيق للمستخدم', a.items.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>التاريخ والوقت</th><th>الإجراء</th><th>الوحدة</th><th>التفاصيل</th></tr></thead><tbody>${a.items.map((x) => `<tr><td>${dtFmt(x.at)}</td><td>${esc({ create: 'إضافة', update: 'تعديل', delete: 'حذف', status: 'تغيير حالة', state: 'تغيير حالة', upload: 'رفع ملف', password: 'كلمة المرور', convert: 'تحويل' }[x.action] || x.action)}</td><td>${esc((SC.E[x.entity] || {}).label || x.entity)}</td><td>${esc(x.label)}</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted">لا توجد عمليات مسجلة لهذا المستخدم.</p>', { icon: 'clock' }); }
+    if (tab === 'audit') { const a = await api('GET', `/users/${u.id}/audit`); B.innerHTML = panel('سجل التدقيق للمستخدم', a.items.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>التاريخ والوقت</th><th>الإجراء</th><th>الوحدة</th><th>التفاصيل</th></tr></thead><tbody>${a.items.map((x) => `<tr><td>${dtFmt(x.at)}</td><td>${esc({ create: 'إضافة', update: 'تعديل', delete: 'حذف', status: 'تغيير حالة', state: 'تغيير حالة', upload: 'رفع ملف', password: 'كلمة المرور', convert: 'تحويل' }[x.action] || x.action)}</td><td>${esc((SC.E[x.entity] || {}).label || x.entity)}</td><td>${esc(x.label)}</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted">لا توجد عمليات مسجلة لهذا المستخدم.</p>', { icon: 'clock' })
+      + panel('سجل الدخول', (a.logins || []).length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>الوقت</th><th>النتيجة</th><th>عنوان IP</th></tr></thead><tbody>${a.logins.map((l) => `<tr><td>${dtFmt(l.at)}</td><td>${l.ok ? badge('ناجح', 'green') : badge({ 'bad-password': 'كلمة مرور خاطئة', 'bad-2fa': 'رمز تحقق خاطئ', locked: 'مقفل مؤقتاً', disabled: 'حساب موقوف' }[l.reason] || 'فشل', 'red')}</td><td class="ltr">${esc(l.ip || '')}</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted">لا يوجد سجل دخول.</p>', { icon: 'key' }); }
   };
   main.onclick = async (e) => {
     const t = e.target.closest('[data-tab]'); if (t) { tab = t.dataset.tab; draw(); return; }
     const eye = e.target.closest('.eye'); if (eye) { const i = eye.previousElementSibling; i.type = i.type === 'password' ? 'text' : 'password'; return; }
+    if (e.target.closest('#uUnlock')) { try { await api('PUT', '/users/' + u.id, { unlock: true }); toast('تم فك القفل'); render(); } catch (err) { toast(err.message, 'err'); } return; }
+    if (e.target.closest('#uMfa')) { if (!(await confirmBox('سيتم إيقاف التحقق بخطوتين لهذا المستخدم ليتمكن من الدخول بكلمة المرور ثم إعادة تفعيله. استخدم هذا فقط إذا فقد هاتفه.', { ok: 'إعادة الضبط' }))) return; try { await api('PUT', '/users/' + u.id, { resetMfa: true }); toast('تمت إعادة ضبط التحقق بخطوتين'); render(); } catch (err) { toast(err.message, 'err'); } return; }
     if (e.target.closest('#uToggle')) { try { await api('PUT', '/users/' + u.id, { status: u.status === 'active' ? 'disabled' : 'active' }); toast('تم تحديث حالة الحساب'); render(); } catch (err) { toast(err.message, 'err'); } }
   };
   main.onchange = (e) => { if (e.target.name === 'role') { $('#partyF').hidden = e.target.value !== 'client'; $('#rolePrev').innerHTML = matrix(e.target.value); } };
   main.onsubmit = (e) => { e.preventDefault(); const f = e.target; busy($('[type=submit]', f), async () => {
     const d = readForm(f);
-    if (!u) { if (!/^[\p{L}\p{N}_.]{3,30}$/u.test(d.username)) { fieldError(f, 'username', 'من 3 إلى 30 حرفاً أو رقماً بدون مسافات'); throw new Error('اسم المستخدم غير صالح'); } if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(d.email)) { fieldError(f, 'email', 'أدخل بريداً صحيحاً'); throw new Error('البريد غير صالح'); } if ((d.password || '').length < 8) { fieldError(f, 'password', '8 أحرف على الأقل'); throw new Error('كلمة المرور قصيرة'); } }
+    if (!u) { if (!/^[\p{L}\p{N}_.]{3,30}$/u.test(d.username)) { fieldError(f, 'username', 'من 3 إلى 30 حرفاً أو رقماً بدون مسافات'); throw new Error('اسم المستخدم غير صالح'); } if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(d.email)) { fieldError(f, 'email', 'أدخل بريداً صحيحاً'); throw new Error('البريد غير صالح'); } if ((d.password || '').length < 8 || !/\d/.test(d.password) || !/[A-Za-z\u0600-\u06FF]/.test(d.password)) { fieldError(f, 'password', '8 أحرف على الأقل، حروف وأرقام معاً'); throw new Error('كلمة المرور ضعيفة'); } }
     if (d.role === 'client' && !d.partyId) { fieldError(f, 'partyId', 'اختر العميل'); throw new Error('اختر العميل المرتبط'); }
     if (u && d.password && d.password.length < 8) { fieldError(f, 'password', '8 أحرف على الأقل'); throw new Error('كلمة المرور قصيرة'); }
     if (u) { await api('PUT', '/users/' + u.id, d); toast('تم حفظ بيانات المستخدم'); } else { await api('POST', '/users', d); toast('تم إنشاء المستخدم، يمكنه الدخول الآن باسم المستخدم وكلمة المرور'); }
@@ -3051,20 +3131,29 @@ route('/settings/system', async (main, p, q) => {
   const s = JSON.parse(JSON.stringify(APP.settings)); let sec = q.s || 'company';
   const draw = () => {
     main.innerHTML = `${pageHead({ title: 'إعدادات النظام', icon: 'gear', crumbs: [['الإعدادات', '#/settings'], ['إعدادات النظام']], updated: false })}
-      <div class="tabs-bar">${[['company', 'بيانات الشركة'], ['currency', 'العملات وأسعار الصرف'], ['invoice', 'الفواتير والدفع'], ['backup', 'التنبيهات والنسخ الاحتياطي']].map(([k, l]) => `<button class="tb ${sec === k ? 'on' : ''}" data-sec="${k}">${l}</button>`).join('')}</div>
+      <div class="tabs-bar">${[['company', 'بيانات الشركة'], ['currency', 'العملات وأسعار الصرف'], ['invoice', 'الفواتير والدفع'], ['security', 'الأمان'], ['backup', 'التنبيهات والنسخ الاحتياطي']].map(([k, l]) => `<button class="tb ${sec === k ? 'on' : ''}" data-sec="${k}">${l}</button>`).join('')}</div>
       <form class="panel form-page" id="sf"><div class="panel-b">${
         sec === 'company' ? `<div class="form-grid cols-2">${[['nameAr', 'اسم الشركة بالعربي'], ['name', 'اسم الشركة بالإنجليزي'], ['address', 'العنوان'], ['phone', 'الهاتف'], ['email', 'البريد الإلكتروني'], ['taxNo', 'الرقم الضريبي'], ['website', 'الموقع الإلكتروني']].map(([k, l]) => `<div class="field"><label>${l}</label><input data-c="${k}" value="${esc(s.company[k] || '')}" ${['phone', 'email', 'taxNo', 'website'].includes(k) ? 'dir="ltr"' : ''}></div>`).join('')}</div><p class="muted">تظهر هذه البيانات في ترويسة الفواتير وعروض الأسعار وبوالص الشحن المطبوعة.</p>`
         : sec === 'currency' ? `<p class="muted">العملة الأساسية للتقارير: <b>${esc(s.base)}</b>. أدخل سعر كل عملة مقابل 1 ${esc(s.base)}.</p><div class="tbl-wrap"><table class="tbl"><thead><tr><th>العملة</th><th>سعر الصرف مقابل ${esc(s.base)}</th></tr></thead><tbody>${s.currencies.map(([c, r], i) => `<tr><td><b>${esc(c)}</b> <small class="muted">${esc(optLabel('invoices', 'currency', c))}</small></td><td><input type="number" step="any" class="ltr num mini-in" data-rate="${i}" value="${r}" ${c === s.base ? 'disabled' : ''}></td></tr>`).join('')}</tbody></table></div>`
         : sec === 'invoice' ? `<div class="form-grid cols-2"><div class="field"><label>نسبة الضريبة الافتراضية %</label><input data-i="taxRate" type="number" step="any" class="ltr" value="${s.invoice.taxRate}"></div><div class="field"><label>مدة الاستحقاق (يوم)</label><input data-i="dueDays" type="number" class="ltr" value="${s.invoice.dueDays}"></div>
             <div class="field"><label>اسم البنك</label><input data-i="bankName" value="${esc(s.invoice.bankName || '')}"></div><div class="field"><label>IBAN</label><input data-i="iban" dir="ltr" value="${esc(s.invoice.iban || '')}"></div><div class="field"><label>رقم الحساب</label><input data-i="account" dir="ltr" value="${esc(s.invoice.account || '')}"></div>
             <div class="field full"><label>شروط الدفع الافتراضية</label><textarea data-i="terms" rows="3">${esc(s.invoice.terms || '')}</textarea></div></div>`
+        : sec === 'security' ? `<h3 class="st-t">${ic('shield')} فرض التحقق بخطوتين</h3><p class="muted">اختر الأدوار التي يجب على أصحابها تفعيل التحقق بخطوتين. من لم يفعّله يُطلب منه ذلك عند دخوله قبل استخدام النظام. ننصح بتفعيله على الأقل لمدير النظام والمدير العام والمحاسبة.</p>
+            <div class="chk-grid">${Object.entries(APP.roles).filter(([k]) => k !== 'client').map(([k, l]) => `<label class="chk"><input type="checkbox" data-r2="${k}" ${(s.security || { require2fa: [] }).require2fa.includes(k) ? 'checked' : ''}> ${esc(l)}</label>`).join('')}</div>
+            <h3 class="st-t">${ic('lock')} سياسات مطبّقة تلقائياً</h3><ul class="policy">
+              <li>${ic('check')} كلمة المرور 8 أحرف على الأقل وتحتوي حروفاً وأرقاماً، ولا تحتوي اسم المستخدم.</li>
+              <li>${ic('check')} قفل الحساب 15 دقيقة بعد 5 محاولات دخول خاطئة متتالية.</li>
+              <li>${ic('check')} تنتهي الجلسة بعد 14 يوماً من عدم النشاط، و30 يوماً كحد أقصى.</li>
+              <li>${ic('check')} تغيير كلمة المرور أو تعطيل الحساب يُخرج المستخدم من كل الأجهزة فوراً.</li>
+              <li>${ic('check')} تسجيل كل محاولات الدخول الناجحة والفاشلة مع عنوان IP.</li></ul>`
         : `<div class="toggles">${[['contracts', 'تنبيهات العقود'], ['ops', 'تنبيهات العمليات والشحنات'], ['customers', 'تنبيهات العملاء'], ['finance', 'تنبيهات الفواتير'], ['system', 'تنبيهات النظام والأسطول']].map(([k, l]) => `<label class="tg"><div><b>${l}</b></div><span class="switch"><input type="checkbox" data-n="${k}" ${s.notify[k] ? 'checked' : ''}><span></span></span></label>`).join('')}</div>
-            <h3 class="st-t">${ic('download')} النسخ الاحتياطي</h3><p class="muted">يحفظ النظام نسخة تلقائية يومياً على الخادم (آخر 14 يوماً). يمكنك أيضاً تنزيل نسخة كاملة من بيانات الشركة.</p><a class="btn ghost" href="api/erp/backup" download>${ic('download')} تنزيل نسخة احتياطية الآن</a>`}
+            <h3 class="st-t">${ic('download')} النسخ الاحتياطي</h3><p class="muted">على السيرفر النظامي تُؤخذ نسخة احتياطية مشفّرة من قاعدة البيانات والملفات تلقائياً كل يوم، ويمكن إرسالها لمكان خارجي. يمكنك أيضاً تنزيل نسخة كاملة من بيانات الشركة الآن.</p><a class="btn ghost" href="api/erp/backup" download>${ic('download')} تنزيل نسخة احتياطية الآن</a>`}
       </div><div class="form-actions"><button class="btn primary" type="submit">${ic('save')} حفظ الإعدادات</button></div></form>`;
   };
-  const cap = () => { $$('[data-c]', main).forEach((i) => { s.company[i.dataset.c] = i.value; }); $$('[data-rate]', main).forEach((i) => { s.currencies[+i.dataset.rate][1] = +i.value || s.currencies[+i.dataset.rate][1]; }); $$('[data-i]', main).forEach((i) => { s.invoice[i.dataset.i] = i.type === 'number' ? +i.value : i.value; }); $$('[data-n]', main).forEach((i) => { s.notify[i.dataset.n] = i.checked; }); };
+  const cap = () => { $$('[data-c]', main).forEach((i) => { s.company[i.dataset.c] = i.value; }); $$('[data-rate]', main).forEach((i) => { s.currencies[+i.dataset.rate][1] = +i.value || s.currencies[+i.dataset.rate][1]; }); $$('[data-i]', main).forEach((i) => { s.invoice[i.dataset.i] = i.type === 'number' ? +i.value : i.value; }); $$('[data-n]', main).forEach((i) => { s.notify[i.dataset.n] = i.checked; });
+    if ($('[data-r2]', main)) s.security = { require2fa: $$('[data-r2]', main).filter((i) => i.checked).map((i) => i.dataset.r2) }; };
   main.onclick = (e) => { const t = e.target.closest('[data-sec]'); if (t) { cap(); sec = t.dataset.sec; draw(); } };
-  main.onsubmit = (e) => { e.preventDefault(); cap(); busy($('[type=submit]', e.target), async () => { await api('PUT', '/settings', { company: s.company, currencies: s.currencies, invoice: s.invoice, notify: s.notify }); APP.settings = s; toast('تم حفظ الإعدادات'); }).catch(() => {}); };
+  main.onsubmit = (e) => { e.preventDefault(); cap(); busy($('[type=submit]', e.target), async () => { await api('PUT', '/settings', { company: s.company, currencies: s.currencies, invoice: s.invoice, notify: s.notify, security: s.security || { require2fa: [] } }); APP.settings = s; toast('تم حفظ الإعدادات'); }).catch(() => {}); };
   draw();
 }, 'settings');
 

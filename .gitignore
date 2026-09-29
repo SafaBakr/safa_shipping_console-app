@@ -1,2 +1,10 @@
 node_modules/
 data/
+deploy/backups/*
+!deploy/backups/.gitkeep
+deploy/rclone/*
+!deploy/rclone/.gitkeep
+.env
+.env.production
+.env.staging
+*.log

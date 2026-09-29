@@ -1,5 +1,5 @@
 // Safa Shipping Console — service worker (network-first for pages, cache-first for static assets)
-const CACHE = 'safa-erp-v9';
+const CACHE = 'safa-erp-v10';
 const ASSETS = [
   './', 'index.html', 'guide.html', 'manifest.webmanifest', 'vendor/xlsx.full.min.js',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/icon-512-maskable.png',

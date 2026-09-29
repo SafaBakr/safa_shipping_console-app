@@ -43,15 +43,16 @@ function clean(ent, input, partial) {
 const lineTotal = (items) => (items || []).reduce((s, i) => s + (Number(i.qty) || 0) * (Number(i.price) || 0), 0);
 const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 
-module.exports = function mountErp(app, ctx) {
+module.exports = async function mountErp(app, ctx) {
   const FILE = path.join(ctx.dataDir, 'erp.db');
-  const BK = path.join(ctx.dataDir, 'backups');
   const FILES = path.join(ctx.dataDir, 'files');
-  fs.mkdirSync(BK, { recursive: true });
   fs.mkdirSync(FILES, { recursive: true });
 
-  let E = { seq: {}, events: [], audit: [], prefs: {}, settings: {} };
-  try { E = Object.assign(E, JSON.parse(fs.readFileSync(FILE, 'utf8'))); } catch (_) {}
+  // state lives in the store (PostgreSQL in production); E is the in-memory working copy
+  const ST = await ctx.store.open('erp', { file: FILE, defaults: { seq: {}, events: [], audit: [], prefs: {}, settings: {} } });
+  const E = ST.state;
+  for (const k of ['events', 'audit']) if (!Array.isArray(E[k])) E[k] = [];
+  for (const k of ['seq', 'prefs', 'settings']) if (!E[k] || typeof E[k] !== 'object' || Array.isArray(E[k])) E[k] = {};
   for (const k of Object.keys(ENT)) if (!Array.isArray(E[k])) E[k] = [];
 
   // ---- migrations from v1 ----
@@ -84,10 +85,12 @@ module.exports = function mountErp(app, ctx) {
     invoice: { taxRate: 0, dueDays: 30, terms: 'يرجى السداد خلال 30 يوماً من تاريخ الفاتورة.', bankName: '', iban: '', account: '' },
     quality: { audit: { progress: 60, date: '', next: '', steps: [['التخطيط', true], ['التنفيذ', true], ['المراجعة', false], ['الإغلاق', false]] }, satisfaction: 90 },
     notify: { contracts: true, ops: true, customers: true, finance: true, system: true },
+    security: { require2fa: [] },
     roles: null,
   };
   E.settings = Object.assign({}, DEF_SETTINGS, E.settings || {});
   if (!E.settings.roles) E.settings.roles = buildRoles();
+  if (!E.settings.security || !Array.isArray(E.settings.security.require2fa)) E.settings.security = { require2fa: [] };
   function buildRoles() {
     const out = {};
     for (const [r, d] of Object.entries(SC.ROLE_DEFAULTS)) {
@@ -97,21 +100,17 @@ module.exports = function mountErp(app, ctx) {
     return out;
   }
 
-  let dirty = false;
-  function save() {
-    const tmp = FILE + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(E));
-    fs.renameSync(tmp, FILE);
-    const bk = path.join(BK, `erp-${today()}.bak`);
-    if (!fs.existsSync(bk)) {
-      fs.copyFileSync(FILE, bk);
-      fs.readdirSync(BK).filter((f) => f.endsWith('.bak')).sort().slice(0, -14).forEach((f) => fs.unlinkSync(path.join(BK, f)));
-    }
-    dirty = false;
+  // Transactional save: on failure memory is reloaded from the database so nothing stays half-applied.
+  async function save() {
+    try { await ST.save(); }
+    catch (e) { console.error('[db] erp save failed (changes rolled back):', e.message); throw new Error('DBSAVE'); }
   }
-  save();
+  global.__erpFlush = save;
   const nextId = (col) => (E.seq[col] = (E.seq[col] || 0) + 1);
   const yy = () => String(new Date().getFullYear()).slice(2);
+  // audit entries before v3 used `id` for the changed record: move it to `rid` and give each entry its own id
+  E.audit.forEach((a) => { if (!('rid' in a)) { a.rid = a.id ?? null; a.id = nextId('audit'); } });
+  await save();
 
   // ---------- users & permissions ----------
   function roleOf(u) {
@@ -123,7 +122,7 @@ module.exports = function mountErp(app, ctx) {
       if (first) first.role = 'admin';
     }
     if (!u.role || !E.settings.roles[u.role]) u.role = String(u.email).toLowerCase() === String(ctx.adminEmail).toLowerCase() ? 'admin' : 'viewer';
-    ctx.saveUsers();
+    ctx.saveUsers().catch(() => {});
     return u.role;
   }
   const permsOf = (u) => u.role === 'admin' ? Object.fromEntries(MODULE_KEYS.map((m) => [m, 'rcud'])) : ((E.settings.roles[u.role] || {}).perms || {});
@@ -142,9 +141,16 @@ module.exports = function mountErp(app, ctx) {
   const deny = (res, m = 'ليست لديك صلاحية لهذا الإجراء.') => res.status(403).json({ ok: false, error: m });
   const bad = (res, m) => res.status(422).json({ ok: false, error: m });
   const nf = (res) => res.status(404).json({ ok: false, error: 'العنصر غير موجود.' });
-  const wrap = (fn) => (req, res) => { try { fn(req, res); } catch (e) { console.error('ERP error:', e); res.status(500).json({ ok: false, error: 'حدث خطأ في الخادم.' }); } };
+  const wrap = (fn) => async (req, res) => {
+    try { await fn(req, res); }
+    catch (e) {
+      if (res.headersSent) return;
+      if (e.message === 'DBSAVE') return res.status(503).json({ ok: false, error: 'تعذّر حفظ البيانات حالياً ولم يتم تطبيق التغيير. حاول مرة أخرى بعد لحظات.' });
+      console.error('ERP error:', e); res.status(500).json({ ok: false, error: 'حدث خطأ في الخادم.' });
+    }
+  };
   function audit(u, entity, id, action, label) {
-    E.audit.push({ at: now(), by: u.username, entity, id, action, label: String(label || '').slice(0, 200) });
+    E.audit.push({ id: nextId('audit'), at: now(), by: u.username, entity, rid: id, action, label: String(label || '').slice(0, 200) });
     if (E.audit.length > 5000) E.audit.splice(0, E.audit.length - 5000);
   }
   function jobEvent(jobId, u, type, text, extra = {}) {
@@ -192,21 +198,22 @@ module.exports = function mountErp(app, ctx) {
   }
 
   // ---------- meta ----------
-  app.get('/api/erp/meta', wrap((req, res) => {
+  app.get('/api/erp/meta', wrap(async (req, res) => {
     const u = req.user;
     res.json({ ok: true,
       user: { id: u.id, username: u.username, email: u.email, role: u.role, roleLabel: (E.settings.roles[u.role] || {}).label || u.role,
-        partyId: u.partyId || null, branchId: u.branchId || null, fullName: u.fullName || '', phone: u.phone || '', lastLogin: u.lastLogin || null, created: u.created },
+        partyId: u.partyId || null, branchId: u.branchId || null, fullName: u.fullName || '', phone: u.phone || '', lastLogin: u.lastLogin || null, created: u.created,
+        mfa: !!(u.mfa && u.mfa.enabled), must2fa: E.settings.security.require2fa.includes(u.role) && !(u.mfa && u.mfa.enabled) },
       perms: permsOf(u),
       prefs: E.prefs[u.id] || {},
       roles: Object.fromEntries(Object.entries(E.settings.roles).map(([k, v]) => [k, v.label])),
       users: isClient(u) ? [] : ctx.users().filter((x) => x.status === 'active').map((x) => ({ id: x.id, username: x.username, role: x.role || 'viewer', fullName: x.fullName || '' })),
-      settings: { company: E.settings.company, base: E.settings.base, currencies: E.settings.currencies, invoice: E.settings.invoice, quality: E.settings.quality, notify: E.settings.notify },
+      settings: { company: E.settings.company, base: E.settings.base, currencies: E.settings.currencies, invoice: E.settings.invoice, quality: E.settings.quality, notify: E.settings.notify, security: E.settings.security },
     });
   }));
 
   // ---------- bulk load ----------
-  app.get('/api/erp/bulk', wrap((req, res) => {
+  app.get('/api/erp/bulk', wrap(async (req, res) => {
     const u = req.user;
     if (isClient(u)) return deny(res);
     const out = {};
@@ -257,21 +264,21 @@ module.exports = function mountErp(app, ctx) {
   };
   const CUSTOMS_FIELDS = ['declNo', 'declDate', 'customsOffice', 'customsType', 'channel', 'dutyAmount', 'hsCode', 'brokerId', 'importer', 'importerTax', 'exporter', 'exporterCountry', 'goodsValue', 'goodsCurrency'];
 
-  app.get('/api/erp/e/:ent', wrap((req, res) => {
+  app.get('/api/erp/e/:ent', wrap(async (req, res) => {
     const ent = req.params.ent; if (!ENT[ent]) return nf(res);
     if (!can(req.user, ENT[ent].module, 'r') && !(ent === 'jobs' && can(req.user, 'customs', 'r'))) return deny(res);
     let list = E[ent];
     if (ent === 'documents') list = list.filter((d) => docVisible(req.user, d));
     res.json({ ok: true, items: list.map((it) => view(ent, it)) });
   }));
-  app.get('/api/erp/e/:ent/:id', wrap((req, res) => {
+  app.get('/api/erp/e/:ent/:id', wrap(async (req, res) => {
     const ent = req.params.ent; if (!ENT[ent]) return nf(res);
     if (!can(req.user, ENT[ent].module, 'r') && !(ent === 'jobs' && can(req.user, 'customs', 'r'))) return deny(res);
     const it = E[ent].find((x) => x.id === +req.params.id); if (!it) return nf(res);
     res.json({ ok: true, item: view(ent, it) });
   }));
 
-  app.post('/api/erp/e/:ent', wrap((req, res) => {
+  app.post('/api/erp/e/:ent', wrap(async (req, res) => {
     const ent = req.params.ent; if (!ENT[ent]) return nf(res);
     const u = req.user, w = canWrite(u, ent, 'c');
     if (!w) return deny(res);
@@ -321,7 +328,7 @@ module.exports = function mountErp(app, ctx) {
     if (ent === 'trucks' && E.trucks.some((t) => t.plate.toLowerCase() === item.plate.toLowerCase())) return bad(res, 'رقم اللوحة مسجّل مسبقاً.');
     if (ent === 'attendance') {
       const ex = E.attendance.find((a) => a.employeeId === item.employeeId && a.date === item.date);
-      if (ex) { Object.assign(ex, data, { updatedAt: now() }); save(); return res.json({ ok: true, item: ex }); }
+      if (ex) { Object.assign(ex, data, { updatedAt: now() }); await save(); return res.json({ ok: true, item: ex }); }
     }
     if (ent === 'interactions' && !item.date) item.date = now().slice(0, 16);
     if (ent === 'complaints' && !item.date) item.date = today();
@@ -332,11 +339,11 @@ module.exports = function mountErp(app, ctx) {
     if (ent === 'costs') jobEvent(item.jobId, u, 'update', `إضافة تكلفة: ${item.amount} ${item.currency}`);
     if (ent === 'documents' && item.entity === 'jobs' && item.entityId) jobEvent(item.entityId, u, 'update', `رفع مستند: ${item.name}`);
     audit(u, ent, item.id, 'create', item.no || item.code || item.name || item.title || item.plate || '');
-    save();
+    await save();
     res.json({ ok: true, item: view(ent, item) });
   }));
 
-  app.put('/api/erp/e/:ent/:id', wrap((req, res) => {
+  app.put('/api/erp/e/:ent/:id', wrap(async (req, res) => {
     const ent = req.params.ent; if (!ENT[ent]) return nf(res);
     const u = req.user;
     const it = E[ent].find((x) => x.id === +req.params.id); if (!it) return nf(res);
@@ -358,11 +365,11 @@ module.exports = function mountErp(app, ctx) {
     if (ent === 'tasks' && 'done' in data && it.jobId && changed.includes('done')) jobEvent(it.jobId, u, 'update', `${data.done ? 'تم إنجاز' : 'أعيد فتح'} مهمة: ${it.title}`);
     if (ent === 'invoices' && changed.includes('state')) audit(u, ent, it.id, 'state', `${it.no}: ${it.state}`);
     audit(u, ent, it.id, 'update', it.no || it.code || it.name || it.title || it.plate || '');
-    save();
+    await save();
     res.json({ ok: true, item: view(ent, it) });
   }));
 
-  app.delete('/api/erp/e/:ent/:id', wrap((req, res) => {
+  app.delete('/api/erp/e/:ent/:id', wrap(async (req, res) => {
     const ent = req.params.ent; if (!ENT[ent]) return nf(res);
     const u = req.user;
     if (!can(u, ENT[ent].module, 'd') && !(ent === 'tasks' && canWrite(u, 'tasks', 'u'))) return deny(res);
@@ -395,12 +402,12 @@ module.exports = function mountErp(app, ctx) {
     if (ent === 'documents' && it.fileId) { try { fs.unlinkSync(path.join(FILES, it.fileId)); } catch (_) {} }
     E[ent] = E[ent].filter((x) => x.id !== id);
     audit(u, ent, id, 'delete', it.no || it.code || it.name || it.title || it.plate || '');
-    save();
+    await save();
     res.json({ ok: true });
   }));
 
   // ---------- shipments ----------
-  app.get('/api/erp/jobs/:id/full', wrap((req, res) => {
+  app.get('/api/erp/jobs/:id/full', wrap(async (req, res) => {
     const u = req.user;
     if (!can(u, 'ops', 'r') && !can(u, 'customs', 'r')) return deny(res);
     const j = E.jobs.find((x) => x.id === +req.params.id); if (!j) return nf(res);
@@ -417,7 +424,7 @@ module.exports = function mountErp(app, ctx) {
       invoices: E.invoices.filter((i) => i.jobId === j.id).map(invoiceView),
       trips: E.trips.filter((t) => t.jobId === j.id) });
   }));
-  app.post('/api/erp/jobs/:id/status', wrap((req, res) => {
+  app.post('/api/erp/jobs/:id/status', wrap(async (req, res) => {
     const u = req.user;
     const j = E.jobs.find((x) => x.id === +req.params.id); if (!j) return nf(res);
     const fam = SC.family(j.mode);
@@ -431,10 +438,10 @@ module.exports = function mountErp(app, ctx) {
     const note = T.str(req.body.note);
     jobEvent(j.id, u, 'status', `${SC.JOB_STATUS[from][0]} ← ${SC.JOB_STATUS[st][0]}`, { from, to: st, note });
     audit(u, 'jobs', j.id, 'status', `${j.no}: ${st}`);
-    save();
+    await save();
     res.json({ ok: true, job: view('jobs', j) });
   }));
-  app.post('/api/erp/jobs/:id/note', wrap((req, res) => {
+  app.post('/api/erp/jobs/:id/note', wrap(async (req, res) => {
     const u = req.user;
     if (!can(u, 'ops', 'r') && !can(u, 'customs', 'r')) return deny(res);
     const j = E.jobs.find((x) => x.id === +req.params.id); if (!j) return nf(res);
@@ -443,18 +450,18 @@ module.exports = function mountErp(app, ctx) {
     const priority = ['low', 'medium', 'high'].includes(req.body.priority) ? req.body.priority : 'medium';
     const category = ['general', 'customs', 'delivery', 'customer', 'docs'].includes(req.body.category) ? req.body.category : 'general';
     jobEvent(j.id, u, 'comment', text, { title, priority, category });
-    save();
+    await save();
     res.json({ ok: true });
   }));
-  app.post('/api/erp/jobs/:id/duplicate', wrap((req, res) => {
+  app.post('/api/erp/jobs/:id/duplicate', wrap(async (req, res) => {
     const u = req.user; if (!can(u, 'ops', 'c')) return deny(res);
     const j = E.jobs.find((x) => x.id === +req.params.id); if (!j) return nf(res);
     const copy = { ...j, id: nextId('jobs'), status: 'draft', atd: '', ata: '', etd: '', eta: '', declNo: '', mbl: '', hbl: '', cmr: '', bookingNo: '', containers: [], createdBy: u.id, createdAt: now(), updatedAt: now() };
     const key = `${copy.mode}-${yy()}`; const n = (E.seq[key] = (E.seq[key] || 0) + 1); copy.no = `${key}-${String(n).padStart(4, '0')}`;
-    E.jobs.push(copy); jobEvent(copy.id, u, 'create', `تم إنشاء الشحنة كنسخة من ${j.no}`); audit(u, 'jobs', copy.id, 'create', copy.no); save();
+    E.jobs.push(copy); jobEvent(copy.id, u, 'create', `تم إنشاء الشحنة كنسخة من ${j.no}`); audit(u, 'jobs', copy.id, 'create', copy.no); await save();
     res.json({ ok: true, item: view('jobs', copy) });
   }));
-  app.post('/api/erp/quotes/:id/convert', wrap((req, res) => {
+  app.post('/api/erp/quotes/:id/convert', wrap(async (req, res) => {
     const u = req.user; if (!can(u, 'ops', 'c') && !can(u, 'crm', 'u')) return deny(res);
     const q = E.quotes.find((x) => x.id === +req.params.id); if (!q) return nf(res);
     if (q.jobId) return bad(res, 'تم تحويل هذا العرض مسبقاً.');
@@ -462,15 +469,15 @@ module.exports = function mountErp(app, ctx) {
     const job = { id: nextId('jobs'), mode, customerId: q.partyId, origin: q.origin, destination: q.destination, cargo: q.cargo, priority: 'normal', containers: [], status: 'draft', createdBy: u.id, createdAt: now(), updatedAt: now() };
     const key = `${mode}-${yy()}`; const n = (E.seq[key] = (E.seq[key] || 0) + 1); job.no = `${key}-${String(n).padStart(4, '0')}`;
     E.jobs.push(job); q.jobId = job.id; q.status = 'accepted'; q.updatedAt = now();
-    jobEvent(job.id, u, 'create', `تم إنشاء الشحنة من عرض السعر ${q.no}`); audit(u, 'quotes', q.id, 'convert', q.no); save();
+    jobEvent(job.id, u, 'create', `تم إنشاء الشحنة من عرض السعر ${q.no}`); audit(u, 'quotes', q.id, 'convert', q.no); await save();
     res.json({ ok: true, job: view('jobs', job) });
   }));
-  app.post('/api/erp/jobs/:id/invoice', wrap((req, res) => {
+  app.post('/api/erp/jobs/:id/invoice', wrap(async (req, res) => {
     const u = req.user; if (!can(u, 'finance', 'c')) return deny(res);
     const j = E.jobs.find((x) => x.id === +req.params.id); if (!j) return nf(res);
     const inv = { id: nextId('invoices'), partyId: j.customerId, jobId: j.id, date: today(), currency: 'USD', items: [], discount: 0, taxRate: E.settings.invoice.taxRate || 0, state: 'draft', notes: '', createdBy: u.id, createdAt: now(), updatedAt: now() };
     const d = new Date(); d.setDate(d.getDate() + (E.settings.invoice.dueDays || 30)); inv.dueDate = d.toISOString().slice(0, 10);
-    applyNumbers('invoices', inv); calcTotals('invoices', inv); E.invoices.push(inv); audit(u, 'invoices', inv.id, 'create', inv.no); save();
+    applyNumbers('invoices', inv); calcTotals('invoices', inv); E.invoices.push(inv); audit(u, 'invoices', inv.id, 'create', inv.no); await save();
     res.json({ ok: true, item: invoiceView(inv) });
   }));
 
@@ -479,7 +486,7 @@ module.exports = function mountErp(app, ctx) {
     'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx', 'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'pptx',
     'application/msword': 'doc', 'application/vnd.ms-excel': 'xls' };
   const express = require('express');
-  app.post('/api/erp/files', express.raw({ type: () => true, limit: '10mb' }), wrap((req, res) => {
+  app.post('/api/erp/files', express.raw({ type: () => true, limit: '10mb' }), wrap(async (req, res) => {
     const u = req.user;
     const mime = String(req.headers['content-type'] || '').split(';')[0];
     if (!MIMES[mime]) return bad(res, 'نوع الملف غير مدعوم. المسموح: PDF, DOCX, XLSX, PPTX, JPG, PNG.');
@@ -490,7 +497,7 @@ module.exports = function mountErp(app, ctx) {
     audit(u, 'files', 0, 'upload', name);
     res.json({ ok: true, fileId: id, size: req.body.length, mime, name });
   }));
-  app.get('/api/erp/files/:id', wrap((req, res) => {
+  app.get('/api/erp/files/:id', wrap(async (req, res) => {
     const u = req.user, id = String(req.params.id);
     if (!/^[a-f0-9]{24}\.[a-z]{3,4}$/.test(id)) return nf(res);
     const doc = E.documents.find((d) => d.fileId === id);
@@ -506,7 +513,7 @@ module.exports = function mountErp(app, ctx) {
   }));
 
   // ---------- customer portal ----------
-  app.get('/api/erp/portal', wrap((req, res) => {
+  app.get('/api/erp/portal', wrap(async (req, res) => {
     const u = req.user;
     const partyId = isClient(u) ? u.partyId : (can(u, 'crm', 'r') ? +req.query.partyId : null);
     if (!partyId) return bad(res, isClient(u) ? 'حسابك غير مرتبط بعميل بعد. تواصل مع الشركة.' : 'اختر العميل لمعاينة البوابة.');
@@ -521,49 +528,50 @@ module.exports = function mountErp(app, ctx) {
         .map((d) => ({ id: d.id, no: d.no, name: d.name, type: d.type, fileId: d.fileId, fileName: d.fileName, createdAt: d.createdAt })),
       quotes: E.quotes.filter((q) => q.partyId === partyId).map((q) => ({ id: q.id, no: q.no, date: q.date, status: q.status, total: q.total, currency: q.currency, origin: q.origin, destination: q.destination })) });
   }));
-  app.post('/api/erp/portal/quote', wrap((req, res) => {
+  app.post('/api/erp/portal/quote', wrap(async (req, res) => {
     const u = req.user; if (!isClient(u) || !u.partyId) return deny(res);
     const q = { id: nextId('quotes'), partyId: u.partyId, date: today(), mode: SC.MODES.map((m) => m[0]).includes(req.body.mode) ? req.body.mode : 'SI',
       origin: T.str(req.body.origin), destination: T.str(req.body.destination), cargo: T.text(req.body.cargo), currency: 'USD', items: [], total: 0, status: 'requested',
       notes: T.text(req.body.notes), createdBy: u.id, createdAt: now(), updatedAt: now() };
     if (!q.origin || !q.destination) return bad(res, 'حدد مكان الانطلاق والوجهة.');
-    applyNumbers('quotes', q); E.quotes.push(q); audit(u, 'quotes', q.id, 'portal-request', q.no); save();
+    applyNumbers('quotes', q); E.quotes.push(q); audit(u, 'quotes', q.id, 'portal-request', q.no); await save();
     res.json({ ok: true, item: q });
   }));
-  app.post('/api/erp/portal/document', wrap((req, res) => {
+  app.post('/api/erp/portal/document', wrap(async (req, res) => {
     const u = req.user; if (!isClient(u) || !u.partyId) return deny(res);
     const b = req.body || {};
     if (!b.fileId || !fs.existsSync(path.join(FILES, String(b.fileId)))) return bad(res, 'ارفع الملف أولاً.');
     const d = { id: nextId('documents'), name: T.str(b.name) || T.str(b.fileName), type: 'shipping', entity: 'parties', entityId: u.partyId, ref: T.str(b.ref), version: '1.0', issueDate: today(), expiryDate: '',
       state: 'review', access: 'client', fileId: String(b.fileId), fileName: T.str(b.fileName), size: T.int(b.size), mime: T.str(b.mime), notes: 'مرفوع من بوابة العميل', createdBy: u.id, createdAt: now(), updatedAt: now() };
-    applyNumbers('documents', d); E.documents.push(d); audit(u, 'documents', d.id, 'portal-upload', d.name); save();
+    applyNumbers('documents', d); E.documents.push(d); audit(u, 'documents', d.id, 'portal-upload', d.name); await save();
     res.json({ ok: true, item: d });
   }));
 
   // ---------- users, roles, settings (admin) ----------
   const adminOnly = (req, res) => { if (req.user.role !== 'admin' && !(req.user.role === 'manager' && req.method === 'GET')) { deny(res, 'هذه الصفحة لمدير النظام فقط.'); return false; } return true; };
-  app.get('/api/erp/users', wrap((req, res) => {
+  app.get('/api/erp/users', wrap(async (req, res) => {
     if (!adminOnly(req, res)) return;
     res.json({ ok: true, items: ctx.users().map((u) => ({ id: u.id, username: u.username, email: u.email, fullName: u.fullName || '', phone: u.phone || '', role: u.role || 'viewer', status: u.status,
-      branchId: u.branchId || null, partyId: u.partyId || null, created: u.created, lastLogin: u.lastLogin || null })) });
+      branchId: u.branchId || null, partyId: u.partyId || null, created: u.created, lastLogin: u.lastLogin || null,
+      mfa: !!(u.mfa && u.mfa.enabled), locked: !!(u.lockUntil && u.lockUntil > Date.now()) })) });
   }));
-  app.post('/api/erp/users', wrap((req, res) => {
+  app.post('/api/erp/users', wrap(async (req, res) => {
     if (!adminOnly(req, res)) return;
     const b = req.body || {};
     const username = T.str(b.username), email = T.str(b.email), password = String(b.password || '');
     if (!/^[\p{L}\p{N}_.]{3,30}$/u.test(username)) return bad(res, 'اسم المستخدم من 3 إلى 30 حرفاً أو رقماً بدون مسافات.');
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return bad(res, 'أدخل بريداً إلكترونياً صحيحاً.');
-    if (password.length < 8) return bad(res, 'كلمة المرور 8 أحرف على الأقل.');
+    const pe = ctx.passwordError(password, username); if (pe) return bad(res, pe);
     const users = ctx.users();
     if (users.some((x) => x.username.toLowerCase() === username.toLowerCase())) return bad(res, 'اسم المستخدم مستخدم مسبقاً.');
     if (users.some((x) => x.email.toLowerCase() === email.toLowerCase())) return bad(res, 'البريد مسجّل مسبقاً.');
     const role = E.settings.roles[b.role] ? b.role : 'viewer';
     if (role === 'client' && !E.parties.some((p) => p.id === T.int(b.partyId))) return bad(res, 'اختر العميل المرتبط بحساب البوابة.');
     const u = ctx.createUser({ username, email, password, role, status: b.status === 'disabled' ? 'disabled' : 'active', fullName: T.str(b.fullName), phone: T.str(b.phone), branchId: T.int(b.branchId), partyId: role === 'client' ? T.int(b.partyId) : null });
-    audit(req.user, 'users', u.id, 'create', username); save();
+    await ctx.saveUsers(); audit(req.user, 'users', u.id, 'create', username); await save();
     res.json({ ok: true, id: u.id });
   }));
-  app.put('/api/erp/users/:id', wrap((req, res) => {
+  app.put('/api/erp/users/:id', wrap(async (req, res) => {
     if (!adminOnly(req, res)) return;
     const u = ctx.users().find((x) => x.id === +req.params.id); if (!u) return nf(res);
     const b = req.body || {};
@@ -572,21 +580,23 @@ module.exports = function mountErp(app, ctx) {
     if (losing && admins.length <= 1) return bad(res, 'لا يمكن إزالة آخر مدير للنظام.');
     if (b.role) { if (!E.settings.roles[b.role]) return bad(res, 'دور غير صالح.'); u.role = b.role; }
     if (u.role === 'client') { const pid = T.int(b.partyId ?? u.partyId); if (!E.parties.some((p) => p.id === pid)) return bad(res, 'اختر العميل المرتبط بحساب البوابة.'); u.partyId = pid; }
-    if (b.status === 'disabled' || b.status === 'active') { if (u.status === 'pending' && b.status === 'active') return bad(res, 'هذا الحساب لم يُفعّل برمز التفعيل بعد.'); if (u.status !== 'pending') u.status = b.status; }
+    if (b.status === 'disabled' || b.status === 'active') { if (u.status === 'pending' && b.status === 'active') return bad(res, 'هذا الحساب لم يُفعّل برمز التفعيل بعد.'); if (u.status !== 'pending') u.status = b.status; if (u.status === 'disabled') ctx.revokeSessions(u.id); }
+    if (b.resetMfa) { u.mfa = null; delete u.mfaPending; }
+    if (b.unlock) { u.lockUntil = 0; u.failCount = 0; }
     if ('fullName' in b) u.fullName = T.str(b.fullName);
     if ('phone' in b) u.phone = T.str(b.phone);
     if ('branchId' in b) u.branchId = T.int(b.branchId);
-    if (b.password) { if (String(b.password).length < 8) return bad(res, 'كلمة المرور 8 أحرف على الأقل.'); u.pass = ctx.hashPass(String(b.password)); }
-    ctx.saveUsers(); audit(req.user, 'users', u.id, 'update', u.username); save();
+    if (b.password) { const pe = ctx.passwordError(b.password, u.username); if (pe) return bad(res, pe); u.pass = ctx.hashPass(String(b.password)); ctx.revokeSessions(u.id); }
+    await ctx.saveUsers(); audit(req.user, 'users', u.id, 'update', u.username); await save();
     res.json({ ok: true });
   }));
-  app.get('/api/erp/users/:id/audit', wrap((req, res) => {
+  app.get('/api/erp/users/:id/audit', wrap(async (req, res) => {
     if (!adminOnly(req, res)) return;
     const u = ctx.users().find((x) => x.id === +req.params.id); if (!u) return nf(res);
-    res.json({ ok: true, items: E.audit.filter((a) => a.by === u.username).slice(-100).reverse() });
+    res.json({ ok: true, items: E.audit.filter((a) => a.by === u.username).slice(-100).reverse(), logins: ctx.loginLog ? ctx.loginLog(u.id) : [] });
   }));
-  app.get('/api/erp/roles', wrap((req, res) => { if (!adminOnly(req, res)) return; res.json({ ok: true, roles: E.settings.roles, modules: SC.MODULES }); }));
-  app.put('/api/erp/roles', wrap((req, res) => {
+  app.get('/api/erp/roles', wrap(async (req, res) => { if (!adminOnly(req, res)) return; res.json({ ok: true, roles: E.settings.roles, modules: SC.MODULES }); }));
+  app.put('/api/erp/roles', wrap(async (req, res) => {
     if (req.user.role !== 'admin') return deny(res);
     const input = req.body.roles || {};
     for (const [r, def] of Object.entries(input)) {
@@ -596,43 +606,44 @@ module.exports = function mountErp(app, ctx) {
       if (r === 'client') continue;
       for (const m of MODULE_KEYS) E.settings.roles[r].perms[m] = String((def.perms || {})[m] || '').replace(/[^rcud]/g, '').split('').filter((c, i, a) => a.indexOf(c) === i).join('');
     }
-    audit(req.user, 'roles', 0, 'update', 'مصفوفة الصلاحيات'); save();
+    audit(req.user, 'roles', 0, 'update', 'مصفوفة الصلاحيات'); await save();
     res.json({ ok: true, roles: E.settings.roles });
   }));
-  app.put('/api/erp/settings', wrap((req, res) => {
+  app.put('/api/erp/settings', wrap(async (req, res) => {
     if (req.user.role !== 'admin') return deny(res);
     const b = req.body || {};
     if (b.company) for (const k of Object.keys(DEF_SETTINGS.company)) if (k in b.company) E.settings.company[k] = T.str(b.company[k]);
     if (Array.isArray(b.currencies)) E.settings.currencies = b.currencies.filter((c) => /^[A-Z]{3}$/.test(c[0]) && Number(c[1]) > 0).map((c) => [c[0], Number(c[1])]);
     if (b.invoice) { const i = b.invoice; E.settings.invoice = { taxRate: T.num(i.taxRate) || 0, dueDays: T.int(i.dueDays) || 30, terms: T.text(i.terms), bankName: T.str(i.bankName), iban: T.str(i.iban), account: T.str(i.account) }; }
     if (b.notify) for (const k of Object.keys(DEF_SETTINGS.notify)) E.settings.notify[k] = !!b.notify[k];
+    if (b.security && Array.isArray(b.security.require2fa)) E.settings.security = { require2fa: b.security.require2fa.filter((r) => E.settings.roles[r] && r !== 'client') };
     if (b.quality) { const q = b.quality; E.settings.quality = { satisfaction: T.num(q.satisfaction) ?? 90, audit: { progress: Math.max(0, Math.min(100, T.int(q.audit?.progress) ?? 0)), date: T.date(q.audit?.date), next: T.date(q.audit?.next),
       steps: (q.audit?.steps || []).slice(0, 8).map((s) => [T.str(s[0]), !!s[1]]) } }; }
-    audit(req.user, 'settings', 0, 'update', 'إعدادات النظام'); save();
+    audit(req.user, 'settings', 0, 'update', 'إعدادات النظام'); await save();
     res.json({ ok: true });
   }));
 
   // ---------- profile ----------
-  app.put('/api/erp/me', wrap((req, res) => {
+  app.put('/api/erp/me', wrap(async (req, res) => {
     const u = req.user, b = req.body || {};
     if ('fullName' in b) u.fullName = T.str(b.fullName);
     if ('phone' in b) u.phone = T.str(b.phone);
     const p = E.prefs[u.id] || (E.prefs[u.id] = {});
     if (b.prefs) for (const k of ['currency', 'lang', 'tz', 'favorites', 'notif', 'readAll', 'readKeys']) if (k in b.prefs) p[k] = b.prefs[k];
     if (Array.isArray(p.readKeys) && p.readKeys.length > 500) p.readKeys = p.readKeys.slice(-500);
-    ctx.saveUsers(); save();
+    await ctx.saveUsers(); await save();
     res.json({ ok: true, prefs: p });
   }));
-  app.post('/api/erp/me/password', wrap((req, res) => {
+  app.post('/api/erp/me/password', wrap(async (req, res) => {
     const u = req.user, b = req.body || {};
     if (!ctx.checkPass(String(b.current || ''), u.pass)) return bad(res, 'كلمة المرور الحالية غير صحيحة.');
-    if (String(b.password || '').length < 8) return bad(res, 'كلمة المرور الجديدة 8 أحرف على الأقل.');
-    u.pass = ctx.hashPass(String(b.password)); ctx.saveUsers(); audit(u, 'users', u.id, 'password', 'تغيير كلمة المرور'); save();
+    const pe = ctx.passwordError(b.password, u.username); if (pe) return bad(res, pe);
+    u.pass = ctx.hashPass(String(b.password)); ctx.revokeSessions(u.id, req.sessionId); await ctx.saveUsers(); audit(u, 'users', u.id, 'password', 'تغيير كلمة المرور'); await save();
     res.json({ ok: true });
   }));
 
   // ---------- backup ----------
-  app.get('/api/erp/backup', wrap((req, res) => {
+  app.get('/api/erp/backup', wrap(async (req, res) => {
     if (req.user.role !== 'admin') return deny(res);
     res.setHeader('Content-Disposition', `attachment; filename="safa-erp-backup-${today()}.json"`);
     res.json({ exportedAt: now(), erp: E });

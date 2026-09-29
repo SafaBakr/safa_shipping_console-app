@@ -1,0 +1,127 @@
+# Safa Shipping Console — production stack
+#   docker compose up -d --build            (production)
+#   docker compose --profile staging up -d  (also start the staging copy)
+name: safa
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: safa_erp
+      POSTGRES_USER: safa
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+      TZ: ${TZ:-Asia/Damascus}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U safa -d safa_erp"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [internal]
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db: { condition: service_healthy }
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      TRUST_PROXY: 1
+      DATA_DIR: /app/data
+      DATABASE_URL: postgresql://safa:${DB_PASSWORD}@db:5432/safa_erp
+      TZ: ${TZ:-Asia/Damascus}
+    volumes:
+      - app_data:/app/data
+    networks: [internal, web]
+
+  backup:
+    build: ./deploy/backup
+    restart: unless-stopped
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      PGHOST: db
+      PGUSER: safa
+      PGPASSWORD: ${DB_PASSWORD}
+      PGDATABASE: safa_erp
+      BACKUP_CRON: ${BACKUP_CRON:-30 2 * * *}
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-14}
+      BACKUP_PASSPHRASE: ${BACKUP_PASSPHRASE:?Set BACKUP_PASSPHRASE in .env}
+      RCLONE_REMOTE: ${RCLONE_REMOTE:-}
+      TZ: ${TZ:-Asia/Damascus}
+    volumes:
+      - app_data:/appdata:ro
+      - ./deploy/backups:/backups
+      - ./deploy/rclone:/config:ro
+    networks: [internal]
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on: [app]
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      DOMAIN: ${DOMAIN:?Set DOMAIN in .env}
+      STAGING_DOMAIN: ${STAGING_DOMAIN:-staging.localhost}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [web]
+
+  # ---- staging copy (separate database and files; for testing updates before production) ----
+  db-staging:
+    image: postgres:16-alpine
+    profiles: [staging]
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: safa_staging
+      POSTGRES_USER: safa
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - db_staging:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U safa -d safa_staging"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [internal]
+
+  app-staging:
+    build: .
+    profiles: [staging]
+    restart: unless-stopped
+    depends_on:
+      db-staging: { condition: service_healthy }
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      TRUST_PROXY: 1
+      DATA_DIR: /app/data
+      SITE_NAME: "Safa Shipping Console (تجريبي)"
+      DATABASE_URL: postgresql://safa:${DB_PASSWORD}@db-staging:5432/safa_staging
+      SESSION_SECRET: ${STAGING_SESSION_SECRET:-staging-secret-change-me}
+    volumes:
+      - app_staging:/app/data
+    networks: [internal, web]
+
+volumes:
+  db_data:
+  app_data:
+  db_staging:
+  app_staging:
+  caddy_data:
+  caddy_config:
+
+networks:
+  internal:
+  web:
