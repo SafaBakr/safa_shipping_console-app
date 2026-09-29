@@ -1,3 +1,0 @@
-{
-  "ignore": ["data/*", "data/**", "*.db", "*.log", "*.tmp", "*.key"]
-}
